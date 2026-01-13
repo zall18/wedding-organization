@@ -1,0 +1,113 @@
+// 1. Konfigurasi Koneksi
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// 2. MODEL USER (Admin/WO/EO)
+// Ini adalah akun kamu atau akun klien (WO) yang mengelola acara.
+model User {
+  id        Int      @id @default(autoincrement())
+  email     String   @unique
+  password  String // Disimpan dalam bentuk Hash (Bcrypt)
+  name      String
+  role      UserRole @default(ADMIN) // 'admin' atau 'organizer'
+  createdAt DateTime @default(now())
+
+  events     Event[] // Relasi: Satu user bisa bikin banyak event nikahan
+  CheckInLog CheckInLog[]
+}
+
+enum UserRole {
+  ADMIN
+  ORGANIZER
+  STAFF
+}
+
+// 3. MODEL EVENT (Acara Pernikahan)
+// Menyimpan detail setiap kondangan.
+model Event {
+  id         Int      @id @default(autoincrement())
+  slug       String   @unique
+  name       String
+  date       DateTime
+  location   String?
+  themeColor String? // branding
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+
+  userId Int
+  user   User @relation(fields: [userId], references: [id])
+
+  guests   Guest[]
+  photos   PhotoLog[]
+  checkIns CheckInLog[]
+}
+
+model Guest {
+  id       Int     @id @default(autoincrement())
+  name     String
+  phone    String?
+  category String  @default("Reguler")
+
+  invitedPax Int  @default(1)
+  arrivedPax Int? // Diisi saat check-in
+
+  qrCode String @unique @default(uuid())
+
+  status      GuestStatus @default(PENDING)
+  checkInTime DateTime?
+
+  eventId Int
+  event   Event @relation(fields: [eventId], references: [id])
+
+  photos   PhotoLog[]
+  checkIns CheckInLog[]
+}
+
+enum CheckInMethod {
+  QR
+  SEARCH
+}
+
+model CheckInLog {
+  id         Int           @id @default(autoincrement())
+  arrivedPax Int
+  method     CheckInMethod // QR / SEARCH
+  createdAt  DateTime      @default(now())
+
+  guestId Int
+  guest   Guest @relation(fields: [guestId], references: [id])
+
+  eventId Int
+  event   Event @relation(fields: [eventId], references: [id])
+
+  staffId Int?
+  staff   User? @relation(fields: [staffId], references: [id])
+}
+
+model PhotoLog {
+  id          Int      @id @default(autoincrement())
+  imagePath   String
+  sentToWa    Boolean  @default(false)
+  waMessageId String?
+  waError     String?
+  createdAt   DateTime @default(now())
+
+  eventId Int
+  event   Event @relation(fields: [eventId], references: [id])
+
+  guestId Int?
+  guest   Guest? @relation(fields: [guestId], references: [id])
+}
+
+// 6. ENUM (Pilihan Tetap)
+enum GuestStatus {
+  PENDING
+  CONFIRMED
+  PRESENT // Sudah hadir/scan
+}
