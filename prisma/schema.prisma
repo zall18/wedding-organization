@@ -18,7 +18,8 @@ model User {
   role      UserRole @default(ADMIN) // 'admin' atau 'organizer'
   createdAt DateTime @default(now())
 
-  events     Event[] // Relasi: Satu user bisa bikin banyak event nikahan
+  eventId    Int? 
+  event      Event?       @relation(fields: [eventId], references: [id])
   CheckInLog CheckInLog[]
 }
 
@@ -40,9 +41,7 @@ model Event {
   isActive   Boolean  @default(true)
   createdAt  DateTime @default(now())
 
-  userId Int
-  user   User @relation(fields: [userId], references: [id])
-
+  users    User[]
   guests   Guest[]
   photos   PhotoLog[]
   checkIns CheckInLog[]

@@ -5,12 +5,20 @@ const jwt = require('jsonwebtoken');
 const { route } = require("../../routes/authRoutes");
 
 const prisma = new PrismaClient();
-const SECRET_KEY = process.env.JWT_SECRET || "kunci_api";
+const SECRET_KEY = process.env.SECRET_KEY || "kunci_api";
 
 const register = async (req, res) => {
-    const {name, email, password, role} = req.body;
+    const {name, email, password, role, eventId} = req.body;
 
     try {
+
+        if(req.user.role == "ORGANIZER" && role == "ADMIN") {
+            return res.status(400).json({
+                msg : "Organizer can only create staff account"
+            });
+        }
+        
+
         const existingUser = await prisma.user.findUnique({
             where: {
                 email
@@ -18,24 +26,58 @@ const register = async (req, res) => {
         });
 
         if(existingUser) {
-            res.status(400).json({
+            return res.status(400).json({
                 msg: "Email already used"
+            });
+        }
+
+        if(role == "ORGANIZER" && !eventId) {
+            return res.status(400).json({
+                msg: "Organizer need an event to handle"
+            });
+        }
+
+        if(role == "ADMIN" && eventId) {
+            return res.status(400).json({
+                msg: "Admin doesn't need event"
+            });
+        }
+
+        if(eventId) {
+            const event = await prisma.event.findFirst({
+                where : {
+                    id : eventId
+                }
+            });
+            if(!event) {
+                return res.status(400).json({
+                    msg: "Event not found"
+                });
+            }
+        }
+        console.log(parseInt(req.user.eventId));
+
+        if(req.user.role == "ORGANIZER" && (parseInt(req.user.eventId) != eventId)) {
+            return res.status(400).json({
+                msg: "Organizer can register account only in his event"
             });
         }
 
         const hashedPassword = await bcrypt.hash(password, 10);
 
-        await prisma.user.create({
+        const regData = await prisma.user.create({
             data: {
                 name: name,
                 email: email, 
                 password: hashedPassword,
-                role: role || "ADMIN"
+                role: role,
+                eventId
             }
         });
 
-        res.status(201).json({
-            "msg" : "Register berhasil"
+        return res.status(201).json({
+            "msg" : "Register berhasil",
+            data : regData
         });
 
     } catch (e) {
@@ -56,7 +98,7 @@ const login = async (req, res) => {
         });
 
         if(!user) {
-            res.status(404).json({
+            return res.status(404).json({
                 msg: "User can't be found"
             });
         }
@@ -64,7 +106,7 @@ const login = async (req, res) => {
         const isMatch = await bcrypt.compare(password, user.password);
 
         if(!isMatch) {
-            res.status(400).json({
+            return res.status(400).json({
                 msg: "Email or password not match"
             });
         }
@@ -74,7 +116,8 @@ const login = async (req, res) => {
                 id: user.id,
                 name: user.name,
                 email: user.email,
-                role: user.role
+                role: user.role,
+                eventId: user.eventId
             },
             SECRET_KEY,
             {

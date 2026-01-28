@@ -50,6 +50,13 @@ const updateEvent = async(req, res) => {
     const { name, date, location, themeColor, isActive, eventId } = req.body;
 
     try {
+
+        if(req.user.role == "ORGANIZER" && (parseInt(req.user.eventId) != eventId)) {
+            return res.status(400).json({
+                msg: "Organizer only can update his own event"
+            });
+        }
+
         const event = await prisma.event.findFirst({
             where : {
                 id: eventId
