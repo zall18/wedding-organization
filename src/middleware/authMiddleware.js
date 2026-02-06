@@ -3,15 +3,17 @@ const SECRET_KEY = process.env.SECRET_KEY;
 
 const authMiddleware = (req, res, next) => {
     const authHeader = req.headers.authorization;
+    const authCookies = req.cookies?.token;
     console.log("AUTH HEADER:", req.headers.authorization);
+    console.log("AUTH cookies:", authCookies);
 
-    if(!authHeader) {
+    if(!authHeader && !authCookies) {
         return res.status(401).json({
             msg: "Unauthorized"
         });
     }
 
-    const token = authHeader.split(" ")[1];
+    const token = authCookies || authHeader.split(" ")[1];
 
     if(!token) {
         return res.status(401).json({
