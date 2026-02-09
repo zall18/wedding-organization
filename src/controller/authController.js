@@ -8,17 +8,15 @@ const prisma = new PrismaClient();
 const SECRET_KEY = process.env.SECRET_KEY || "kunci_api";
 
 const register = async (req, res) => {
-    const {name, email, password, role, eventId} = req.body;
+    const {name, email, phone, password, role, eventId} = req.body;
 
     try {
 
-        if(req.user.role == "ORGANIZER" && role == "ADMIN") {
-            return res.status(400).json({
-                msg : "Organizer can only create staff account"
-            });
-        }
-        
-
+        // if(req.user.role == "ORGANIZER" && role == "ADMIN") {
+        //     return res.status(400).json({
+        //         msg : "Organizer can only create staff account"
+        //     });
+        // }
         const existingUser = await prisma.user.findUnique({
             where: {
                 email
@@ -55,13 +53,13 @@ const register = async (req, res) => {
                 });
             }
         }
-        console.log(parseInt(req.user.eventId));
+        // console.log(parseInt(req.user.eventId));
 
-        if(req.user.role == "ORGANIZER" && (parseInt(req.user.eventId) != eventId)) {
-            return res.status(400).json({
-                msg: "Organizer can register account only in his event"
-            });
-        }
+        // if(req.user.role == "ORGANIZER" && (parseInt(req.user.eventId) != eventId)) {
+        //     return res.status(400).json({
+        //         msg: "Organizer can register account only in his event"
+        //     });
+        // }
 
         const hashedPassword = await bcrypt.hash(password, 10);
 
@@ -70,8 +68,9 @@ const register = async (req, res) => {
                 name: name,
                 email: email, 
                 password: hashedPassword,
-                role: role,
-                eventId
+                role,
+                phone,
+                
             }
         });
 
@@ -81,6 +80,7 @@ const register = async (req, res) => {
         });
 
     } catch (e) {
+        console.log(e);
         res.status("500").json({
             "msg" : "server error"
         });

@@ -1,5 +1,5 @@
 const { PrismaClient } = require('@prisma/client');
-const { generateShortCode } = require('../utils/helpers'); // Anda perlu buat helper ini
+const { generateShortCode } = require('./utils/helpers'); // Anda perlu buat helper ini
 
 const prisma = new PrismaClient();
 
