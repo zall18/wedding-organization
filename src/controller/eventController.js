@@ -53,6 +53,9 @@ const createEvent = async(req, res) => {
 
     try {
         // Generate slug
+
+        console.log(req.body.weddingTitle);
+        
         const baseSlug = weddingTitle
             .toLowerCase()
             .trim()
@@ -98,8 +101,8 @@ const createEvent = async(req, res) => {
                 brideName: brideName,
                 weddingTitle: weddingTitle || `The Wedding of ${groomName} & ${brideName}`,
                 date: new Date(date),
-                startTime: new Date(startTime),
-                endTime: new Date(endTime),
+                startTime: new Date(date),
+                endTime: new Date(date),
                 venueName: venueName,
                 venueType: venueTypeUpper,
                 address: address,
