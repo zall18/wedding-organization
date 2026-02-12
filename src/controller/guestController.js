@@ -1,5 +1,4 @@
 const { PrismaClient } = require('@prisma/client');
-const { generateSlug, generateRandomCode } = require('./utils/helpers');
 const prisma = new PrismaClient();
 
 // =======================
@@ -7,7 +6,7 @@ const prisma = new PrismaClient();
 // =======================
 
 /**
- * Generate unique short ID untuk guest
+ * Generate unique short ID untuk guest (8 karakter)
  */
 const generateUniqueShortId = async (eventId) => {
     const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
@@ -16,7 +15,7 @@ const generateUniqueShortId = async (eventId) => {
     
     while (!isUnique) {
         shortId = '';
-        for (let i = 0; i < 6; i++) {
+        for (let i = 0; i < 8; i++) { // ✅ 8 karakter sesuai schema
             shortId += characters.charAt(Math.floor(Math.random() * characters.length));
         }
         
@@ -36,7 +35,7 @@ const generateUniqueShortId = async (eventId) => {
 };
 
 /**
- * Format phone number untuk WhatsApp
+ * Format phone number untuk WhatsApp (20 karakter)
  */
 const formatPhoneForWA = (phone) => {
     if (!phone) return null;
@@ -57,7 +56,8 @@ const formatPhoneForWA = (phone) => {
         formatted = formatted;
     }
     
-    return formatted;
+    // Limit to 20 characters sesuai schema
+    return formatted.slice(0, 20);
 };
 
 // =======================
@@ -67,21 +67,19 @@ const formatPhoneForWA = (phone) => {
 /**
  * CREATE GUEST
  * Menambahkan tamu baru ke event
+ * ✅ SESUAI SCHEMA Guest model
  */
 const createGuest = async(req, res) => {
     const { 
         name, 
         phone, 
         email,
-        invitedPax = 1,
-        maxPlusOnes = 0,
+        invitedCount = 1,
+        plusOneAllowed = 0,
         eventId,
         category = "REGULAR",
         groupName,
-        tableId,
-        seatNumber,
-        specialRequest,
-        notes
+        rsvpStatus = "PENDING"
     } = req.body;
 
     try {
@@ -96,59 +94,45 @@ const createGuest = async(req, res) => {
             });
         }
 
-        // Validate event capacity
-        if (event.maxGuests) {
-            const currentGuests = await prisma.guest.count({
-                where: { eventId: parseInt(eventId), isDeleted: false }
+        // Format phone number (wajib)
+        if (!phone) {
+            return res.status(400).json({
+                msg: "Phone number is required"
             });
-            
-            if (currentGuests >= event.maxGuests) {
-                return res.status(400).json({
-                    msg: "Event has reached maximum guest capacity"
-                });
-            }
         }
-
-        // Format phone number
         const formattedPhone = formatPhoneForWA(phone);
 
-        // Check duplicate phone in same event
-        if (formattedPhone) {
-            const existingGuest = await prisma.guest.findFirst({
-                where: {
-                    eventId: parseInt(eventId),
-                    phone: formattedPhone,
-                    isDeleted: false
-                }
-            });
-
-            if (existingGuest) {
-                return res.status(400).json({
-                    msg: "Guest with this phone number already exists in this event"
-                });
+        // Check duplicate phone in same event (unique constraint)
+        const existingGuest = await prisma.guest.findFirst({
+            where: {
+                eventId: parseInt(eventId),
+                phone: formattedPhone
             }
+        });
+
+        if (existingGuest) {
+            return res.status(400).json({
+                msg: "Guest with this phone number already exists in this event"
+            });
         }
 
         // Generate unique identifiers
-        const qrCode = `WED-${event.shortCode}-${Date.now()}-${Math.random().toString(36).substring(7)}`;
         const shortId = await generateUniqueShortId(parseInt(eventId));
 
-        // Create guest
+        // Create guest - ✅ SESUAI DENGAN SCHEMA Guest
         const guest = await prisma.guest.create({
             data: {
                 name,
                 phone: formattedPhone,
                 email,
-                invitedCount: invitedPax,
-                maxPlusOnes,
+                invitedCount,
+                plusOneAllowed,
                 category: category.toUpperCase(),
                 groupName,
                 eventId: parseInt(eventId),
-                qrCode,
-                shortId,
-                specialRequest,
-                notes,
+                shortId, // ✅ shortId di-generate, qrCode auto UUID
                 status: 'INVITED',
+                rsvpStatus: rsvpStatus.toUpperCase(),
                 createdAt: new Date(),
                 updatedAt: new Date()
             },
@@ -161,9 +145,7 @@ const createGuest = async(req, res) => {
                         brideName: true,
                         shortCode: true
                     }
-                },
-                group: true,
-                table: true
+                }
             }
         });
 
@@ -177,28 +159,11 @@ const createGuest = async(req, res) => {
             }
         });
 
-        // Create notification for new guest
-        await prisma.notification.create({
-            data: {
-                type: 'GUEST_ADDED',
-                title: 'Tamu Baru Ditambahkan',
-                message: `${name} telah ditambahkan ke daftar tamu`,
-                channel: 'IN_APP',
-                status: 'PENDING',
-                eventId: parseInt(eventId),
-                data: {
-                    guestId: guest.id,
-                    guestName: name,
-                    invitedPax
-                }
-            }
-        });
-
         res.status(201).json({
             msg: "Success to add guest",
             data: guest,
-            qrCodeUrl: `${process.env.BASE_URL}/api/guest/qr/${guest.id}`,
-            shortUrl: `${process.env.BASE_URL}/invite/${event.shortCode}/${shortId}`
+            qrCode: guest.qrCode, // ✅ Auto-generated UUID
+            invitationUrl: `${process.env.BASE_URL}/invite/${event.shortCode}/${guest.shortId}`
         });
 
     } catch(e) {
@@ -210,9 +175,66 @@ const createGuest = async(req, res) => {
     }
 };
 
+
+const getGuestByEventIdSlug = async(req, res) => {
+    const SlugId  = req.params.slug;
+
+    try {
+        const guests = await prisma.event.findFirst({
+            where : {
+                slug : SlugId
+            },
+            include : {
+                guests : {
+                    select : {
+                        id : true,
+                        name : true,
+                        email : true,
+                        phone : true, 
+                        invitedCount : true,
+                        plusOneAllowed: true,
+                        category : true, 
+                        status : true, 
+                        groupName : true,
+                        qrCode : true, 
+                        shortId : true,
+                        rsvpDate : true
+                    }
+                }
+            }
+        });
+
+        const eventData = await prisma.event.findFirst({
+            where: { id : 1 },
+            include: { _count: { select: { guests: true } } } // Ini buat ngitung jumlah tamu aslinya
+        });
+
+        console.log("Event Ketemu:", eventData?.id);
+        console.log("Jumlah tamu di DB:", eventData?._count?.guests);
+
+        if(!guests) {
+            return res.status(400).json({
+                msg: "Event not found"
+            });
+        }
+
+        return res.status(200).json({
+            msg: "Success to get data",
+            data : guests
+        });
+    } catch(e) {
+        console.log(e);
+        res.status(500).json({
+            msg: "Server Error"
+        });
+    }
+}
+
+
 /**
  * BULK CREATE GUESTS
  * Import tamu dalam jumlah besar
+ * ✅ SESUAI SCHEMA Guest model
  */
 const bulkCreateGuests = async(req, res) => {
     const { eventId, guests } = req.body;
@@ -237,20 +259,20 @@ const bulkCreateGuests = async(req, res) => {
             try {
                 const formattedPhone = formatPhoneForWA(guestData.phone);
                 const shortId = await generateUniqueShortId(parseInt(eventId));
-                const qrCode = `WED-${event.shortCode}-${Date.now()}-${Math.random().toString(36).substring(7)}`;
 
                 const guest = await prisma.guest.create({
                     data: {
                         name: guestData.name,
                         phone: formattedPhone,
                         email: guestData.email,
-                        invitedCount: guestData.invitedPax || 1,
+                        invitedCount: guestData.invitedCount || 1,
+                        plusOneAllowed: guestData.plusOneAllowed || 0,
                         category: guestData.category?.toUpperCase() || 'REGULAR',
                         groupName: guestData.groupName,
                         eventId: parseInt(eventId),
-                        qrCode,
                         shortId,
-                        status: 'INVITED'
+                        status: 'INVITED',
+                        rsvpStatus: 'PENDING'
                     }
                 });
 
@@ -289,6 +311,7 @@ const bulkCreateGuests = async(req, res) => {
 /**
  * SEARCH GUESTS
  * Pencarian tamu dengan berbagai filter
+ * ✅ SESUAI SCHEMA Guest model
  */
 const searchGuests = async(req, res) => {
     const { 
@@ -297,6 +320,7 @@ const searchGuests = async(req, res) => {
         category, 
         status, 
         groupName,
+        rsvpStatus,
         page = 1,
         limit = 20,
         sortBy = 'name',
@@ -304,10 +328,9 @@ const searchGuests = async(req, res) => {
     } = req.query;
 
     try {
-        // Build where clause
+        // Build where clause - ✅ SESUAI FIELD Guest
         const whereClause = {
-            eventId: parseInt(eventId),
-            isDeleted: false
+            eventId: parseInt(eventId)
         };
 
         // Text search
@@ -351,6 +374,10 @@ const searchGuests = async(req, res) => {
             whereClause.status = status;
         }
 
+        if (rsvpStatus) {
+            whereClause.rsvpStatus = rsvpStatus.toUpperCase();
+        }
+
         if (groupName) {
             whereClause.groupName = {
                 contains: groupName,
@@ -367,7 +394,7 @@ const searchGuests = async(req, res) => {
             where: whereClause
         });
 
-        // Get guests
+        // Get guests - ✅ SESUAI RELASI yang ada di schema
         const guests = await prisma.guest.findMany({
             where: whereClause,
             include: {
@@ -378,26 +405,24 @@ const searchGuests = async(req, res) => {
                         shortCode: true
                     }
                 },
-                rsvp: true,
-                table: {
-                    select: {
-                        id: true,
-                        tableNumber: true,
-                        tableName: true
+                checkIns: {
+                    take: 1,
+                    orderBy: {
+                        checkedInAt: 'desc'
                     }
                 },
-                group: {
-                    select: {
-                        id: true,
-                        name: true,
-                        color: true
+                photos: {
+                    take: 1,
+                    where: {
+                        isCheckInPhoto: true
                     }
                 },
                 _count: {
                     select: {
                         checkIns: true,
                         photos: true,
-                        wishMessages: true
+                        guestWishes: true,
+                        whatsAppLogs: true
                     }
                 }
             },
@@ -408,7 +433,7 @@ const searchGuests = async(req, res) => {
             take
         });
 
-        // Get check-in status for each guest
+        // Format response
         const guestsWithStatus = guests.map(guest => ({
             ...guest,
             isCheckedIn: guest.status === 'ATTENDED',
@@ -440,15 +465,15 @@ const searchGuests = async(req, res) => {
 
 /**
  * GET GUEST BY ID
+ * ✅ SESUAI SCHEMA Guest model
  */
 const getGuestById = async(req, res) => {
     const id = parseInt(req.params.id);
 
     try {
-        const guest = await prisma.guest.findFirst({
+        const guest = await prisma.guest.findUnique({
             where: {
-                id,
-                isDeleted: false
+                id
             },
             include: {
                 event: {
@@ -458,20 +483,21 @@ const getGuestById = async(req, res) => {
                         groomName: true,
                         brideName: true,
                         date: true,
+                        startTime: true,
+                        endTime: true,
                         venueName: true,
                         shortCode: true,
-                        primaryColor: true
+                        primaryColor: true,
+                        allowPhotoOnCheckIn: true,
+                        autoSendPhotoToWA: true
                     }
                 },
-                rsvp: true,
-                table: true,
-                group: true,
                 checkIns: {
                     orderBy: {
                         checkedInAt: 'desc'
                     },
                     include: {
-                        staff: {
+                        checkedInBy: {
                             select: {
                                 id: true,
                                 name: true
@@ -481,20 +507,22 @@ const getGuestById = async(req, res) => {
                     }
                 },
                 photos: {
-                    where: {
-                        isCheckInPhoto: true
-                    },
                     orderBy: {
                         takenAt: 'desc'
                     }
                 },
-                wishMessages: {
+                whatsAppLogs: {
+                    orderBy: {
+                        sentAt: 'desc'
+                    },
+                    take: 5
+                },
+                guestWishes: {
                     orderBy: {
                         createdAt: 'desc'
                     },
                     take: 5
-                },
-                payments: true
+                }
             }
         });
 
@@ -507,7 +535,7 @@ const getGuestById = async(req, res) => {
         res.status(200).json({
             msg: "Success to get guest",
             data: guest,
-            qrCodeUrl: `${process.env.BASE_URL}/api/guest/qr/${guest.id}`,
+            qrCode: guest.qrCode,
             invitationUrl: `${process.env.BASE_URL}/invite/${guest.event.shortCode}/${guest.shortId}`
         });
 
@@ -521,6 +549,7 @@ const getGuestById = async(req, res) => {
 
 /**
  * UPDATE GUEST
+ * ✅ SESUAI SCHEMA Guest model
  */
 const updateGuest = async(req, res) => {
     const id = parseInt(req.params.id);
@@ -529,22 +558,19 @@ const updateGuest = async(req, res) => {
         phone,
         email,
         invitedCount,
-        maxPlusOnes,
+        plusOneAllowed,
         category,
         groupName,
-        tableId,
-        seatNumber,
         status,
-        specialRequest,
-        notes
+        rsvpStatus,
+        rsvpNote,
+        rsvpDate,
+        checkedInBy
     } = req.body;
 
     try {
-        const guest = await prisma.guest.findFirst({
-            where: {
-                id,
-                isDeleted: false
-            }
+        const guest = await prisma.guest.findUnique({
+            where: { id }
         });
 
         if (!guest) {
@@ -563,8 +589,7 @@ const updateGuest = async(req, res) => {
                 where: {
                     eventId: guest.eventId,
                     phone: formattedPhone,
-                    id: { not: id },
-                    isDeleted: false
+                    id: { not: id }
                 }
             });
 
@@ -582,20 +607,15 @@ const updateGuest = async(req, res) => {
                 phone: formattedPhone,
                 email: email !== undefined ? email : guest.email,
                 invitedCount: invitedCount || guest.invitedCount,
-                maxPlusOnes: maxPlusOnes !== undefined ? maxPlusOnes : guest.maxPlusOnes,
+                plusOneAllowed: plusOneAllowed !== undefined ? plusOneAllowed : guest.plusOneAllowed,
                 category: category?.toUpperCase() || guest.category,
                 groupName: groupName !== undefined ? groupName : guest.groupName,
-                tableId: tableId ? parseInt(tableId) : guest.tableId,
-                seatNumber: seatNumber || guest.seatNumber,
                 status: status || guest.status,
-                specialRequest: specialRequest !== undefined ? specialRequest : guest.specialRequest,
-                notes: notes !== undefined ? notes : guest.notes,
+                rsvpStatus: rsvpStatus?.toUpperCase() || guest.rsvpStatus,
+                rsvpNote: rsvpNote !== undefined ? rsvpNote : guest.rsvpNote,
+                rsvpDate: rsvpDate ? new Date(rsvpDate) : guest.rsvpDate,
+                checkedInBy: checkedInBy !== undefined ? checkedInBy : guest.checkedInBy,
                 updatedAt: new Date()
-            },
-            include: {
-                event: true,
-                table: true,
-                group: true
             }
         });
 
@@ -613,14 +633,21 @@ const updateGuest = async(req, res) => {
 };
 
 /**
- * DELETE GUEST (Soft Delete)
+ * DELETE GUEST (Hard Delete karena tidak ada soft delete di schema)
+ * ⚠️ SCHEMA TIDAK ADA FIELD isDeleted, jadi hard delete
  */
 const deleteGuest = async(req, res) => {
     const id = parseInt(req.params.id);
 
     try {
-        const guest = await prisma.guest.findFirst({
-            where: { id }
+        const guest = await prisma.guest.findUnique({
+            where: { id },
+            include: {
+                checkIns: true,
+                photos: true,
+                whatsAppLogs: true,
+                guestWishes: true
+            }
         });
 
         if (!guest) {
@@ -629,14 +656,29 @@ const deleteGuest = async(req, res) => {
             });
         }
 
-        // Soft delete
-        await prisma.guest.update({
-            where: { id },
-            data: {
-                isDeleted: true,
-                deletedAt: new Date()
-            }
-        });
+        // Hapus semua relasi terlebih dahulu
+        await prisma.$transaction([
+            // Delete guest wishes
+            prisma.guestWish.deleteMany({
+                where: { guestId: id }
+            }),
+            // Delete WhatsApp logs
+            prisma.whatsAppLog.deleteMany({
+                where: { guestId: id }
+            }),
+            // Delete photos (check-in photos)
+            prisma.eventPhoto.deleteMany({
+                where: { guestId: id }
+            }),
+            // Delete check-in logs
+            prisma.checkInLog.deleteMany({
+                where: { guestId: id }
+            }),
+            // Finally delete guest
+            prisma.guest.delete({
+                where: { id }
+            })
+        ]);
 
         // Update event total guests
         await prisma.event.update({
@@ -666,20 +708,21 @@ const deleteGuest = async(req, res) => {
 
 /**
  * CHECK-IN HANDLER
- * Proses check-in tamu dengan foto otomatis
+ * Proses check-in tamu dengan foto
+ * ✅ SESUAI SCHEMA CheckInLog, Guest, EventPhoto
  */
 const checkinHandler = async(req, res) => {
     const { 
         qrCode, 
         guestId, 
-        arrivedPax = 1, 
+        arrivedCount = 1, 
         method,
-        photoBase64,
-        deviceInfo
+        deviceType,
+        deviceBrowser
     } = req.body;
     
     const eventId = parseInt(req.params.eventId);
-    const staffId = req.user?.id; // From auth middleware
+    const staffId = req.user?.id;
 
     // Validations
     if (!method) {
@@ -722,35 +765,20 @@ const checkinHandler = async(req, res) => {
             });
         }
 
-        // Check event time
-        const now = new Date();
-        if (event.checkInStartTime && now < event.checkInStartTime) {
-            return res.status(400).json({
-                msg: "Check-in not started yet"
-            });
-        }
-        if (event.checkInEndTime && now > event.checkInEndTime) {
-            return res.status(400).json({
-                msg: "Check-in time has ended"
-            });
-        }
-
         // Find guest
         let guest;
         if (method === "QR_SCAN") {
             guest = await prisma.guest.findFirst({
                 where: {
                     eventId,
-                    qrCode,
-                    isDeleted: false
+                    qrCode
                 }
             });
         } else {
             guest = await prisma.guest.findFirst({
                 where: {
                     eventId,
-                    id: parseInt(guestId),
-                    isDeleted: false
+                    id: parseInt(guestId)
                 }
             });
         }
@@ -763,7 +791,6 @@ const checkinHandler = async(req, res) => {
 
         // Check if already checked in
         if (guest.status === "ATTENDED") {
-            // Allow re-check-in with additional pax?
             return res.status(400).json({
                 msg: "This guest has already checked in",
                 data: {
@@ -775,75 +802,48 @@ const checkinHandler = async(req, res) => {
             });
         }
 
-        // Validate arrived pax
-        if (!arrivedPax || arrivedPax < 1) {
+        // Validate arrived count
+        if (!arrivedCount || arrivedCount < 1) {
             return res.status(400).json({
-                msg: "Arrived pax must be at least 1"
+                msg: "Arrived count must be at least 1"
             });
         }
 
-        if (arrivedPax > guest.invitedCount + guest.maxPlusOnes) {
+        if (arrivedCount > guest.invitedCount + guest.plusOneAllowed) {
             return res.status(400).json({
-                msg: `Arrived pax exceeds maximum (${guest.invitedCount + guest.maxPlusOnes})`
+                msg: `Arrived count exceeds maximum (${guest.invitedCount + guest.plusOneAllowed})`
             });
         }
 
         // Start transaction
         const result = await prisma.$transaction(async (tx) => {
-            // 1. Upload photo if exists
-            let photo = null;
-            if (photoBase64 && event.allowPhotoOnCheckIn) {
-                // Save photo logic here
-                const filename = `checkin-${event.shortCode}-${guest.shortId}-${Date.now()}.jpg`;
-                const filePath = `/uploads/events/${event.shortCode}/checkins/${filename}`;
-                
-                // Convert base64 to file and save
-                // ... implementation depends on your file storage system
-
-                photo = await tx.eventPhoto.create({
-                    data: {
-                        filename,
-                        filePath,
-                        mimeType: 'image/jpeg',
-                        eventId: event.id,
-                        guestId: guest.id,
-                        takenById: staffId,
-                        isCheckInPhoto: true,
-                        waStatus: event.autoSendPhotoToWA ? 'PENDING' : 'UPLOADED',
-                        takenAt: new Date()
-                    }
-                });
-            }
-
-            // 2. Update guest status
+            // 1. Update guest status - ✅ SESUAI Guest model
             const updatedGuest = await tx.guest.update({
                 where: { id: guest.id },
                 data: {
                     status: "ATTENDED",
-                    arrivedPax,
+                    arrivedPax: arrivedCount,
                     checkedInAt: new Date(),
-                    checkedInBy: staffId ? req.user?.name : null,
-                    checkInPhotoId: photo?.id,
+                    checkedInBy: req.user?.name || null,
                     updatedAt: new Date()
                 }
             });
 
-            // 3. Create check-in log
+            // 2. Create check-in log - ✅ SESUAI CheckInLog model
             const checkIn = await tx.checkInLog.create({
                 data: {
-                    arrivedCount: arrivedPax,
+                    arrivedCount,
                     method,
                     guestId: guest.id,
                     eventId: event.id,
                     checkedInById: staffId,
-                    photoId: photo?.id,
-                    deviceType: deviceInfo?.type,
-                    deviceBrowser: deviceInfo?.browser,
+                    deviceType,
+                    deviceBrowser,
                     checkedInAt: new Date()
                 }
             });
 
-            // 4. Update event attended count
+            // 3. Update event attended count
             await tx.event.update({
                 where: { id: event.id },
                 data: {
@@ -853,50 +853,9 @@ const checkinHandler = async(req, res) => {
                 }
             });
 
-            // 5. Create WhatsApp log if auto-send enabled
-            if (photo && event.autoSendPhotoToWA && guest.phone) {
-                await tx.whatsAppLog.create({
-                    data: {
-                        messageId: `WA-${Date.now()}`,
-                        toPhone: guest.phone,
-                        toName: guest.name,
-                        messageType: 'PHOTO',
-                        caption: `Halo ${guest.name}, terima kasih telah hadir di pernikahan ${event.groomName} & ${event.brideName}! Berikut foto Anda saat check-in.`,
-                        photoId: photo.id,
-                        guestId: guest.id,
-                        eventId: event.id,
-                        status: 'PENDING',
-                        sentAt: new Date()
-                    }
-                });
-            }
-
-            // 6. Create notification for staff
-            if (staffId) {
-                await tx.notification.create({
-                    data: {
-                        type: 'CHECK_IN',
-                        title: 'Check-in Berhasil',
-                        message: `${guest.name} telah check-in dengan ${arrivedPax} orang`,
-                        channel: 'IN_APP',
-                        status: 'PENDING',
-                        recipientId: staffId,
-                        eventId: event.id,
-                        data: {
-                            guestId: guest.id,
-                            guestName: guest.name,
-                            arrivedPax,
-                            method,
-                            photoId: photo?.id
-                        }
-                    }
-                });
-            }
-
             return { 
                 guest: updatedGuest, 
-                checkIn, 
-                photo,
+                checkIn,
                 event 
             };
         });
@@ -905,9 +864,9 @@ const checkinHandler = async(req, res) => {
         await prisma.eventStats.create({
             data: {
                 eventId: event.id,
-                totalGuests: await prisma.guest.count({ where: { eventId: event.id, isDeleted: false } }),
+                totalGuests: await prisma.guest.count({ where: { eventId: event.id } }),
                 guestsArrived: await prisma.guest.count({ where: { eventId: event.id, status: 'ATTENDED' } }),
-                guestsPending: await prisma.guest.count({ where: { eventId: event.id, status: { not: 'ATTENDED' }, isDeleted: false } }),
+                guestsPending: await prisma.guest.count({ where: { eventId: event.id, status: { not: 'ATTENDED' } } }),
                 checkInsLastHour: await prisma.checkInLog.count({
                     where: {
                         eventId: event.id,
@@ -931,11 +890,11 @@ const checkinHandler = async(req, res) => {
                     arrivedPax: result.guest.arrivedPax,
                     checkedInAt: result.guest.checkedInAt
                 },
-                photo: result.photo ? {
-                    id: result.photo.id,
-                    url: result.photo.filePath,
-                    thumbnail: result.photo.thumbnailPath
-                } : null,
+                checkIn: {
+                    id: result.checkIn.id,
+                    method: result.checkIn.method,
+                    checkedInAt: result.checkIn.checkedInAt
+                },
                 qrCode: guest.qrCode,
                 invitationUrl: `${process.env.BASE_URL}/invite/${event.shortCode}/${guest.shortId}`
             }
@@ -951,18 +910,113 @@ const checkinHandler = async(req, res) => {
 };
 
 /**
+ * ADD CHECK-IN PHOTO
+ * Menambahkan foto ke check-in log
+ * ✅ SESUAI SCHEMA EventPhoto & CheckInLog
+ */
+const addCheckInPhoto = async(req, res) => {
+    const { 
+        checkInId,
+        filename,
+        filePath,
+        thumbnailPath,
+        fileSize,
+        mimeType,
+        width,
+        height,
+        waStatus = 'PENDING'
+    } = req.body;
+    
+    const staffId = req.user?.id;
+
+    try {
+        // Get check-in log
+        const checkIn = await prisma.checkInLog.findUnique({
+            where: { id: parseInt(checkInId) },
+            include: {
+                guest: true,
+                event: true
+            }
+        });
+
+        if (!checkIn) {
+            return res.status(404).json({
+                msg: "Check-in log not found"
+            });
+        }
+
+        // Create photo - ✅ SESUAI EventPhoto model
+        const photo = await prisma.eventPhoto.create({
+            data: {
+                filename,
+                filePath,
+                thumbnailPath,
+                fileSize,
+                mimeType,
+                width,
+                height,
+                eventId: checkIn.eventId,
+                guestId: checkIn.guestId,
+                takenById: staffId,
+                takenAt: new Date(),
+                isCheckInPhoto: true,
+                waStatus,
+                checkInLog: {
+                    connect: { id: checkIn.id }
+                }
+            }
+        });
+
+        // Update check-in log with photoId (unique constraint)
+        await prisma.checkInLog.update({
+            where: { id: checkIn.id },
+            data: {
+                photoId: photo.id
+            }
+        });
+
+        // Auto-send to WhatsApp if enabled
+        if (checkIn.event.autoSendPhotoToWA && checkIn.guest.phone) {
+            await prisma.whatsAppLog.create({
+                data: {
+                    messageId: `WA-${Date.now()}`,
+                    toPhone: checkIn.guest.phone,
+                    toName: checkIn.guest.name,
+                    messageType: 'PHOTO',
+                    caption: `Halo ${checkIn.guest.name}, terima kasih telah hadir di pernikahan ${checkIn.event.groomName} & ${checkIn.event.brideName}! Berikut foto Anda saat check-in.`,
+                    photoId: photo.id,
+                    guestId: checkIn.guest.id,
+                    eventId: checkIn.event.id,
+                    status: 'PENDING',
+                    sentAt: new Date()
+                }
+            });
+        }
+
+        res.status(201).json({
+            msg: "Success to add check-in photo",
+            data: photo
+        });
+
+    } catch(e) {
+        console.error('Add check-in photo error:', e);
+        res.status(500).json({
+            msg: "Server error"
+        });
+    }
+};
+
+/**
  * UNDO CHECK-IN
+ * ✅ SESUAI SCHEMA Guest & CheckInLog
  */
 const undoCheckin = async(req, res) => {
     const id = parseInt(req.params.id);
     const staffId = req.user?.id;
 
     try {
-        const guest = await prisma.guest.findFirst({
-            where: {
-                id,
-                isDeleted: false
-            },
+        const guest = await prisma.guest.findUnique({
+            where: { id },
             include: {
                 event: true,
                 checkIns: {
@@ -994,7 +1048,7 @@ const undoCheckin = async(req, res) => {
         }
 
         const result = await prisma.$transaction(async (tx) => {
-            // Update guest status
+            // Update guest status - ✅ SESUAI Guest model
             const updatedGuest = await tx.guest.update({
                 where: { id: guest.id },
                 data: {
@@ -1006,7 +1060,7 @@ const undoCheckin = async(req, res) => {
                 }
             });
 
-            // Delete check-in log
+            // Delete check-in log (cascade akan hapus photo? Tidak, photo tetap ada tapi relasi dihapus)
             await tx.checkInLog.delete({
                 where: { id: lastCheckIn.id }
             });
@@ -1020,25 +1074,6 @@ const undoCheckin = async(req, res) => {
                     }
                 }
             });
-
-            // Create notification for undo
-            if (staffId) {
-                await tx.notification.create({
-                    data: {
-                        type: 'CHECK_IN_UNDO',
-                        title: 'Check-in Dibatalkan',
-                        message: `${guest.name} check-in telah dibatalkan`,
-                        channel: 'IN_APP',
-                        status: 'PENDING',
-                        recipientId: staffId,
-                        eventId: guest.eventId,
-                        data: {
-                            guestId: guest.id,
-                            guestName: guest.name
-                        }
-                    }
-                });
-            }
 
             return updatedGuest;
         });
@@ -1058,6 +1093,7 @@ const undoCheckin = async(req, res) => {
 
 /**
  * CHECK-IN HISTORY
+ * ✅ SESUAI SCHEMA CheckInLog
  */
 const checkinHistory = async(req, res) => {
     const eventId = parseInt(req.params.eventId);
@@ -1071,7 +1107,7 @@ const checkinHistory = async(req, res) => {
     } = req.query;
 
     try {
-        const event = await prisma.event.findFirst({
+        const event = await prisma.event.findUnique({
             where: { id: eventId }
         });
 
@@ -1081,7 +1117,7 @@ const checkinHistory = async(req, res) => {
             });
         }
 
-        // Build where clause
+        // Build where clause - ✅ SESUAI CheckInLog fields
         const whereClause = {
             eventId: event.id
         };
@@ -1113,7 +1149,7 @@ const checkinHistory = async(req, res) => {
             where: whereClause
         });
 
-        // Get history
+        // Get history - ✅ SESUAI relasi CheckInLog
         const history = await prisma.checkInLog.findMany({
             where: whereClause,
             include: {
@@ -1123,23 +1159,18 @@ const checkinHistory = async(req, res) => {
                         name: true,
                         phone: true,
                         category: true,
-                        groupName: true
+                        groupName: true,
+                        status: true
                     }
                 },
-                staff: {
+                checkedInBy: {
                     select: {
                         id: true,
                         name: true,
                         email: true
                     }
                 },
-                photo: {
-                    select: {
-                        id: true,
-                        filePath: true,
-                        thumbnailPath: true
-                    }
-                }
+                photo: true
             },
             orderBy: {
                 checkedInAt: 'desc'
@@ -1192,12 +1223,13 @@ const checkinHistory = async(req, res) => {
 
 /**
  * GET CHECK-IN STATISTICS
+ * ✅ SESUAI SCHEMA yang ada
  */
 const getCheckinStats = async(req, res) => {
     const eventId = parseInt(req.params.eventId);
 
     try {
-        const event = await prisma.event.findFirst({
+        const event = await prisma.event.findUnique({
             where: { id: eventId }
         });
 
@@ -1213,28 +1245,24 @@ const getCheckinStats = async(req, res) => {
 
         const stats = await prisma.$transaction([
             // Total guests
+            prisma.guest.count({ where: { eventId } }),
+            
+            // Confirmed guests (rsvpStatus = 'YES')
             prisma.guest.count({
                 where: {
                     eventId,
-                    isDeleted: false
+                    rsvpStatus: 'YES'
                 }
             }),
-            // Confirmed guests
-            prisma.guest.count({
-                where: {
-                    eventId,
-                    rsvpStatus: 'YES',
-                    isDeleted: false
-                }
-            }),
+            
             // Attended guests
             prisma.guest.count({
                 where: {
                     eventId,
-                    status: 'ATTENDED',
-                    isDeleted: false
+                    status: 'ATTENDED'
                 }
             }),
+            
             // Check-ins in last hour
             prisma.checkInLog.count({
                 where: {
@@ -1244,6 +1272,7 @@ const getCheckinStats = async(req, res) => {
                     }
                 }
             }),
+            
             // Check-ins today
             prisma.checkInLog.count({
                 where: {
@@ -1253,6 +1282,7 @@ const getCheckinStats = async(req, res) => {
                     }
                 }
             }),
+            
             // Peak hour calculation
             prisma.$queryRaw`
                 SELECT 
@@ -1264,24 +1294,25 @@ const getCheckinStats = async(req, res) => {
                 ORDER BY count DESC
                 LIMIT 1
             `,
+            
             // Check-in by method
             prisma.checkInLog.groupBy({
                 by: ['method'],
                 where: { eventId },
                 _count: true
             }),
+            
             // Photos taken
             prisma.eventPhoto.count({
                 where: {
-                    eventId,
-                    isCheckInPhoto: true
+                    eventId
                 }
             }),
-            // Photos sent
+            
+            // Photos sent (waStatus = 'DELIVERED')
             prisma.eventPhoto.count({
                 where: {
                     eventId,
-                    isCheckInPhoto: true,
                     waStatus: 'DELIVERED'
                 }
             })
@@ -1293,7 +1324,7 @@ const getCheckinStats = async(req, res) => {
                 totalGuests: stats[0],
                 confirmedGuests: stats[1],
                 attendedGuests: stats[2],
-                attendanceRate: stats[0] > 0 ? (stats[2] / stats[0] * 100).toFixed(2) : 0,
+                attendanceRate: stats[0] > 0 ? ((stats[2] / stats[0]) * 100).toFixed(2) : 0,
                 checkInsLastHour: stats[3],
                 checkInsToday: stats[4],
                 peakHour: stats[5][0]?.hour || null,
@@ -1302,7 +1333,7 @@ const getCheckinStats = async(req, res) => {
                 photos: {
                     taken: stats[7],
                     sent: stats[8],
-                    successRate: stats[7] > 0 ? (stats[8] / stats[7] * 100).toFixed(2) : 0
+                    successRate: stats[7] > 0 ? ((stats[8] / stats[7]) * 100).toFixed(2) : 0
                 }
             }
         });
@@ -1316,83 +1347,127 @@ const getCheckinStats = async(req, res) => {
 };
 
 /**
- * SEND PHOTO TO WHATSAPP
+ * UPDATE PHOTO STATUS
+ * Update status pengiriman WhatsApp
+ * ✅ SESUAI SCHEMA EventPhoto
  */
-const sendPhotoToWhatsApp = async(req, res) => {
-    const { guestId, photoId } = req.body;
+const updatePhotoStatus = async(req, res) => {
+    const { photoId, waStatus, waMessageId, waError } = req.body;
 
     try {
-        const guest = await prisma.guest.findFirst({
-            where: {
-                id: parseInt(guestId),
-                isDeleted: false
-            }
-        });
-
-        const photo = await prisma.eventPhoto.findFirst({
-            where: {
-                id: parseInt(photoId),
-                guestId: parseInt(guestId)
-            },
-            include: {
-                event: true
-            }
-        });
-
-        if (!guest || !photo) {
-            return res.status(404).json({
-                msg: "Guest or photo not found"
-            });
-        }
-
-        if (!guest.phone) {
-            return res.status(400).json({
-                msg: "Guest has no phone number"
-            });
-        }
-
-        // Update photo status
-        await prisma.eventPhoto.update({
-            where: { id: photo.id },
+        const photo = await prisma.eventPhoto.update({
+            where: { id: parseInt(photoId) },
             data: {
-                waStatus: 'SENDING',
-                retryCount: {
-                    increment: 1
-                },
-                lastRetryAt: new Date()
+                waStatus,
+                waMessageId,
+                waError,
+                waSentAt: waStatus === 'DELIVERED' ? new Date() : undefined
             }
         });
 
-        // Create WhatsApp log
+        res.status(200).json({
+            msg: "Success to update photo status",
+            data: photo
+        });
+
+    } catch(e) {
+        console.error('Update photo status error:', e);
+        res.status(500).json({
+            msg: "Server error"
+        });
+    }
+};
+
+// =======================
+// WHATSAPP LOG MANAGEMENT
+// =======================
+
+/**
+ * CREATE WHATSAPP LOG
+ * ✅ SESUAI SCHEMA WhatsAppLog
+ */
+const createWhatsAppLog = async(req, res) => {
+    const {
+        messageId,
+        templateId,
+        toPhone,
+        toName,
+        messageType,
+        caption,
+        photoId,
+        guestId,
+        eventId,
+        status,
+        error
+    } = req.body;
+
+    try {
         const waLog = await prisma.whatsAppLog.create({
             data: {
-                messageId: `WA-${Date.now()}-${photo.id}`,
-                toPhone: guest.phone,
-                toName: guest.name,
-                messageType: 'PHOTO',
-                caption: `Halo ${guest.name}, terima kasih telah hadir di acara ${photo.event.weddingTitle}! Berikut foto Anda.`,
-                photoId: photo.id,
-                guestId: guest.id,
-                eventId: photo.eventId,
-                status: 'PENDING',
+                messageId,
+                templateId,
+                toPhone,
+                toName,
+                messageType,
+                caption,
+                photoId: photoId ? parseInt(photoId) : null,
+                guestId: guestId ? parseInt(guestId) : null,
+                eventId: parseInt(eventId),
+                status,
+                error,
                 sentAt: new Date()
             }
         });
 
-        // TODO: Integrate with actual WhatsApp API
-        // This is where you'd call your WhatsApp service
-
-        res.status(200).json({
-            msg: "Photo send to WhatsApp initiated",
-            data: {
-                waLogId: waLog.id,
-                messageId: waLog.messageId,
-                status: waLog.status
-            }
+        res.status(201).json({
+            msg: "Success to create WhatsApp log",
+            data: waLog
         });
 
     } catch(e) {
-        console.error('Send photo to WhatsApp error:', e);
+        console.error('Create WhatsApp log error:', e);
+        res.status(500).json({
+            msg: "Server error"
+        });
+    }
+};
+
+/**
+ * UPDATE WHATSAPP LOG STATUS
+ * ✅ SESUAI SCHEMA WhatsAppLog
+ */
+const updateWhatsAppStatus = async(req, res) => {
+    const { messageId, status, deliveredAt, readAt, error } = req.body;
+
+    try {
+        const waLog = await prisma.whatsAppLog.update({
+            where: { messageId },
+            data: {
+                status,
+                deliveredAt: deliveredAt ? new Date(deliveredAt) : undefined,
+                readAt: readAt ? new Date(readAt) : undefined,
+                error
+            }
+        });
+
+        // If photo is delivered, update photo status
+        if (waLog.photoId && status === 'DELIVERED') {
+            await prisma.eventPhoto.update({
+                where: { id: waLog.photoId },
+                data: {
+                    waStatus: 'DELIVERED',
+                    waSentAt: new Date()
+                }
+            });
+        }
+
+        res.status(200).json({
+            msg: "Success to update WhatsApp status",
+            data: waLog
+        });
+
+    } catch(e) {
+        console.error('Update WhatsApp status error:', e);
         res.status(500).json({
             msg: "Server error"
         });
@@ -1400,113 +1475,42 @@ const sendPhotoToWhatsApp = async(req, res) => {
 };
 
 // =======================
-// RSVP MANAGEMENT
+// GUEST WISHES
 // =======================
 
 /**
- * SUBMIT RSVP
+ * CREATE GUEST WISH
+ * ✅ SESUAI SCHEMA GuestWish
  */
-const submitRSVP = async(req, res) => {
-    const { 
-        guestId,
-        status,
-        totalPax,
-        plusOnes,
-        attendingCeremony,
-        attendingReception,
-        dietaryPreference,
-        songRequest,
-        transportationNeed,
-        message
+const createGuestWish = async(req, res) => {
+    const {
+        message,
+        fromName,
+        fromPhone,
+        isPublic = true,
+        eventId,
+        guestId
     } = req.body;
 
     try {
-        const guest = await prisma.guest.findFirst({
-            where: {
-                id: parseInt(guestId),
-                isDeleted: false
-            }
-        });
-
-        if (!guest) {
-            return res.status(404).json({
-                msg: "Guest not found"
-            });
-        }
-
-        // Check if RSVP already exists
-        const existingRSVP = await prisma.rsvp.findUnique({
-            where: { guestId: parseInt(guestId) }
-        });
-
-        let rsvp;
-        if (existingRSVP) {
-            // Update existing RSVP
-            rsvp = await prisma.rsvp.update({
-                where: { guestId: parseInt(guestId) },
-                data: {
-                    status,
-                    totalPax: totalPax || guest.invitedCount,
-                    plusOnes: plusOnes || [],
-                    attendingCeremony: attendingCeremony ?? true,
-                    attendingReception: attendingReception ?? true,
-                    dietaryPreference,
-                    songRequest,
-                    transportationNeed: transportationNeed ?? false,
-                    message,
-                    respondedAt: new Date(),
-                    updatedAt: new Date()
-                }
-            });
-        } else {
-            // Create new RSVP
-            rsvp = await prisma.rsvp.create({
-                data: {
-                    guestId: parseInt(guestId),
-                    eventId: guest.eventId,
-                    status,
-                    totalPax: totalPax || guest.invitedCount,
-                    plusOnes: plusOnes || [],
-                    attendingCeremony: attendingCeremony ?? true,
-                    attendingReception: attendingReception ?? true,
-                    dietaryPreference,
-                    songRequest,
-                    transportationNeed: transportationNeed ?? false,
-                    message,
-                    respondedAt: new Date()
-                }
-            });
-        }
-
-        // Update guest status
-        await prisma.guest.update({
-            where: { id: parseInt(guestId) },
+        const wish = await prisma.guestWish.create({
             data: {
-                status: status === 'ATTENDING' ? 'CONFIRMED' : 'INVITED',
-                confirmedPax: status === 'ATTENDING' ? totalPax : null,
-                updatedAt: new Date()
+                message,
+                fromName,
+                fromPhone: fromPhone ? formatPhoneForWA(fromPhone) : null,
+                isPublic,
+                eventId: parseInt(eventId),
+                guestId: guestId ? parseInt(guestId) : null
             }
         });
 
-        // Update event confirmed count
-        if (status === 'ATTENDING') {
-            await prisma.event.update({
-                where: { id: guest.eventId },
-                data: {
-                    confirmedCount: {
-                        increment: 1
-                    }
-                }
-            });
-        }
-
-        res.status(200).json({
-            msg: "RSVP submitted successfully",
-            data: rsvp
+        res.status(201).json({
+            msg: "Success to create guest wish",
+            data: wish
         });
 
     } catch(e) {
-        console.error('Submit RSVP error:', e);
+        console.error('Create guest wish error:', e);
         res.status(500).json({
             msg: "Server error"
         });
@@ -1514,53 +1518,95 @@ const submitRSVP = async(req, res) => {
 };
 
 /**
- * GET GUEST RSVP
+ * GET GUEST WISHES
+ * ✅ SESUAI SCHEMA GuestWish
  */
-const getGuestRSVP = async(req, res) => {
-    const guestId = parseInt(req.params.guestId);
+const getGuestWishes = async(req, res) => {
+    const eventId = parseInt(req.params.eventId);
+    const { page = 1, limit = 20 } = req.query;
 
     try {
-        const rsvp = await prisma.rsvp.findUnique({
-            where: { guestId },
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+        const take = parseInt(limit);
+
+        const wishes = await prisma.guestWish.findMany({
+            where: {
+                eventId,
+                isPublic: true
+            },
+            orderBy: {
+                createdAt: 'desc'
+            },
+            skip,
+            take,
             include: {
                 guest: {
                     select: {
                         id: true,
-                        name: true,
-                        phone: true,
-                        email: true,
-                        invitedCount: true,
-                        maxPlusOnes: true
-                    }
-                },
-                event: {
-                    select: {
-                        id: true,
-                        weddingTitle: true,
-                        date: true,
-                        startTime: true,
-                        endTime: true,
-                        venueName: true,
-                        address: true,
-                        rsvpDeadline: true
+                        name: true
                     }
                 }
             }
         });
 
-        if (!rsvp) {
+        const totalCount = await prisma.guestWish.count({
+            where: {
+                eventId,
+                isPublic: true
+            }
+        });
+
+        res.status(200).json({
+            msg: "Success to get guest wishes",
+            data: wishes,
+            pagination: {
+                page: parseInt(page),
+                limit: parseInt(limit),
+                totalCount,
+                totalPages: Math.ceil(totalCount / parseInt(limit))
+            }
+        });
+
+    } catch(e) {
+        console.error('Get guest wishes error:', e);
+        res.status(500).json({
+            msg: "Server error"
+        });
+    }
+};
+
+// =======================
+// EVENT STATS
+// =======================
+
+/**
+ * GET EVENT STATS
+ * ✅ SESUAI SCHEMA EventStats
+ */
+const getEventStats = async(req, res) => {
+    const eventId = parseInt(req.params.eventId);
+
+    try {
+        const latestStats = await prisma.eventStats.findFirst({
+            where: { eventId },
+            orderBy: {
+                snapshotTime: 'desc'
+            }
+        });
+
+        if (!latestStats) {
             return res.status(404).json({
-                msg: "RSVP not found"
+                msg: "Event stats not found"
             });
         }
 
         res.status(200).json({
-            msg: "Success to get RSVP",
-            data: rsvp
+            msg: "Success to get event stats",
+            data: latestStats
         });
 
     } catch(e) {
-        console.error('Get RSVP error:', e);
+        console.error('Get event stats error:', e);
         res.status(500).json({
             msg: "Server error"
         });
@@ -1575,15 +1621,24 @@ module.exports = {
     getGuestById,
     updateGuest,
     deleteGuest,
+    getGuestByEventIdSlug,
     
     // Check-in Management
     checkinHandler,
+    addCheckInPhoto,
     undoCheckin,
     checkinHistory,
     getCheckinStats,
-    sendPhotoToWhatsApp,
+    updatePhotoStatus,
     
-    // RSVP Management
-    submitRSVP,
-    getGuestRSVP
+    // WhatsApp Log
+    createWhatsAppLog,
+    updateWhatsAppStatus,
+    
+    // Guest Wishes
+    createGuestWish,
+    getGuestWishes,
+    
+    // Event Stats
+    getEventStats
 };

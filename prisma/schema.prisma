@@ -16,7 +16,7 @@ datasource db {
 // =======================
 enum UserRole {
   SUPER_ADMIN // bisa manage multiple events
-  ADMIN // full access per event
+  ADMIN // full access per event  
   STAFF // check-in & foto langsung WA
 }
 
