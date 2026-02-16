@@ -456,7 +456,8 @@ const findEvent = async(req, res) => {
                         select: {
                             guests: true,
                             checkIns: true,
-                            photos: true
+                            photos: true,
+                            users : true
                         }
                     }
                 }
@@ -482,7 +483,8 @@ const findEvent = async(req, res) => {
                         select: {
                             guests: true,
                             checkIns: true,
-                            photos: true
+                            photos: true,
+                            users : true
                         }
                     }
                 }
