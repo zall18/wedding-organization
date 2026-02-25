@@ -1,6 +1,11 @@
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 
+const multer = require('multer');
+const csv = require('csv-parser');
+const fs = require('fs');
+const upload = multer({ dest: 'uploads/' });
+
 // =======================
 // HELPER FUNCTIONS
 // =======================
@@ -33,6 +38,242 @@ const generateUniqueShortId = async (eventId) => {
     
     return shortId;
 };
+
+// =======================
+// IMPORT GUEST FROM CSV
+// =======================
+
+/**
+ * IMPORT GUEST FROM CSV
+ * @route POST /api/guests/import
+ * @access Private (Admin/Staff)
+ */
+const importGuestsFromCSV = async(req, res) => {
+    const { eventId } = req.body;
+    const results = [];
+
+    // Validasi file
+    if (!req.file) {
+        return res.status(400).json({
+            msg: "File CSV wajib diupload!"
+        });
+    }
+
+    // Validasi eventId
+    if (!eventId) {
+        fs.unlinkSync(req.file.path);
+        return res.status(400).json({
+            msg: "Event ID wajib diisi!"
+        });
+    }
+
+    try {
+        // Cek apakah event exists
+        const event = await prisma.event.findUnique({
+            where: { id: parseInt(eventId) }
+        });
+
+        if (!event) {
+            fs.unlinkSync(req.file.path);
+            return res.status(404).json({
+                msg: "Event tidak ditemukan!"
+            });
+        }
+
+        // Cek kapasitas event
+        const currentGuests = await prisma.guest.count({
+            where: { eventId: parseInt(eventId) }
+        });
+
+        // Parse CSV
+        const parseCSV = () => {
+            return new Promise((resolve, reject) => {
+                fs.createReadStream(req.file.path)
+                    .pipe(csv())
+                    .on('data', (data) => {
+                        // Validate required fields
+                        if (!data.name || !data.phone) {
+                            console.warn('Skipping row: missing name or phone', data);
+                            return;
+                        }
+
+                        results.push({
+                            name: data.name.trim(),
+                            phone: data.phone.trim(),
+                            email: data.email ? data.email.trim() : null,
+                            category: data.category ? data.category.toUpperCase().trim() : "REGULAR",
+                            groupName: data.groupName ? data.groupName.trim() : null,
+                            invitedCount: parseInt(data.invitedCount) || 1,
+                            plusOneAllowed: parseInt(data.plusOneAllowed) || 0,
+                            status: "INVITED",
+                            rsvpStatus: "PENDING",
+                            eventId: parseInt(eventId),
+                            createdAt: new Date(),
+                            updatedAt: new Date()
+                        });
+                    })
+                    .on('end', () => {
+                        resolve(results);
+                    })
+                    .on('error', (error) => {
+                        reject(error);
+                    });
+            });
+        };
+
+        const parsedData = await parseCSV();
+
+        // Hapus file setelah parsing
+        fs.unlinkSync(req.file.path);
+
+        // Validasi data kosong
+        if (parsedData.length === 0) {
+            return res.status(400).json({
+                msg: "Tidak ada data valid dalam file CSV"
+            });
+        }
+
+        // Cek kapasitas setelah parsing
+        if (event.maxGuests && (currentGuests + parsedData.length) > event.maxGuests) {
+            return res.status(400).json({
+                msg: `Melebihi kapasitas maksimum tamu (${event.maxGuests}). Saat ini: ${currentGuests} tamu, mencoba import: ${parsedData.length} tamu`
+            });
+        }
+
+        // Format phone numbers dan cek duplikat
+        const formattedData = [];
+        const errors = [];
+        const phoneSet = new Set();
+
+        for (const [index, item] of parsedData.entries()) {
+            try {
+                // Format phone
+                const formattedPhone = formatPhoneForWA(item.phone);
+                
+                if (!formattedPhone) {
+                    errors.push(`Baris ${index + 2}: Nomor telepon tidak valid - ${item.phone}`);
+                    continue;
+                }
+
+                // Cek duplikat dalam file CSV
+                const phoneKey = `${item.eventId}-${formattedPhone}`;
+                if (phoneSet.has(phoneKey)) {
+                    errors.push(`Baris ${index + 2}: Nomor telepon duplikat dalam file - ${item.phone}`);
+                    continue;
+                }
+                phoneSet.add(phoneKey);
+
+                // Generate unique shortId untuk setiap guest (bukan 1 untuk semua!)
+                const shortId = await generateUniqueShortId(parseInt(eventId));
+
+                formattedData.push({
+                    ...item,
+                    phone: formattedPhone,
+                    shortId,
+                    qrCode: `WED-${event.shortCode}-${Date.now()}-${Math.random().toString(36).substring(7)}`
+                });
+
+            } catch (error) {
+                errors.push(`Baris ${index + 2}: Error processing - ${error.message}`);
+            }
+        }
+
+        // Jika ada errors, return dengan list errors
+        if (errors.length > 0) {
+            return res.status(400).json({
+                msg: "Beberapa baris memiliki error",
+                errors: errors,
+                totalErrors: errors.length,
+                totalSuccess: formattedData.length
+            });
+        }
+
+        // Batch insert dengan transaction untuk menghindari partial insert
+        const result = await prisma.$transaction(async (tx) => {
+            // Create many guests
+            const guests = await tx.guest.createMany({
+                data: formattedData,
+                skipDuplicates: true
+            });
+
+            // Update event total guests
+            await tx.event.update({
+                where: { id: parseInt(eventId) },
+                data: {
+                    totalGuests: {
+                        increment: guests.count
+                    }
+                }
+            });
+
+            return guests;
+        });
+
+        res.status(200).json({
+            msg: `Berhasil mengimport ${result.count} dari ${parsedData.length} tamu!`,
+            data: {
+                imported: result.count,
+                total: parsedData.length,
+                skipped: parsedData.length - result.count
+            }
+        });
+
+    } catch (error) {
+        console.error('Import guests error:', error);
+        
+        // Clean up file if exists
+        if (req.file && fs.existsSync(req.file.path)) {
+            fs.unlinkSync(req.file.path);
+        }
+
+        res.status(500).json({
+            msg: "Server error",
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
+    }
+};
+
+/**
+ * DOWNLOAD CSV TEMPLATE
+ * @route GET /api/guests/template
+ * @access Private
+ */
+const downloadCSVTemplate = async(req, res) => {
+    try {
+        const headers = [
+            'name',
+            'phone',
+            'email',
+            'category',
+            'groupName',
+            'invitedCount',
+            'plusOneAllowed'
+        ].join(',');
+
+        const exampleRow = [
+            'John Doe',
+            '081234567890',
+            'john@example.com',
+            'VIP',
+            'Keluarga Mempelai Pria',
+            '2',
+            '1'
+        ].join(',');
+
+        const csvContent = `${headers}\n${exampleRow}`;
+
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', 'attachment; filename=guest-template.csv');
+        res.status(200).send(csvContent);
+
+    } catch (error) {
+        console.error('Download template error:', error);
+        res.status(500).json({
+            msg: "Server error"
+        });
+    }
+};
+
 
 /**
  * Format phone number untuk WhatsApp (20 karakter)
@@ -227,6 +468,60 @@ const getGuestByEventIdSlug = async(req, res) => {
         res.status(500).json({
             msg: "Server Error"
         });
+    }
+}
+
+/**
+ * CONFIRM GUEST (Ubah status ke CONFIRMED)
+ * @route PATCH /api/guests/:id/confirm
+ * @access Private (Staff/Admin)
+ */
+
+const guestConfirmed = async(req, res) => {
+    const shortId = req.params.shortId;
+    try {
+        const guest = await prisma.guest.findFirst({
+            where : {
+                shortId : shortId
+            }
+        });
+
+        if (!guest) {
+            return res.status(404).json({
+                msg: "Guest not found"
+            });
+        }
+
+        if (guest.status === 'ATTENDED') {
+            return res.status(400).json({
+                msg: "Guest already attended, cannot change confirmation"
+            });
+        }
+
+        if (guest.status === 'CANCELLED') {
+            return res.status(400).json({
+                msg: "Guest is cancelled, cannot confirm"
+            });
+        }
+
+        const result = await prisma.guest.update({
+            where : {
+                shortId : shortId
+            },
+             data : {
+                status : "CONFIRMED"
+             }
+        });
+
+        return res.status(200).json({
+            msg : "Success to update status",
+            data : result
+        });
+    } catch(e) {
+        console.error(e);
+        return res.status(500).json({
+            msg : "Server error"
+        })
     }
 }
 
@@ -1616,12 +1911,15 @@ const getEventStats = async(req, res) => {
 module.exports = {
     // Guest Management
     createGuest,
+    importGuestsFromCSV,
+    downloadCSVTemplate,
     bulkCreateGuests,
     searchGuests,
     getGuestById,
     updateGuest,
     deleteGuest,
     getGuestByEventIdSlug,
+    guestConfirmed,
     
     // Check-in Management
     checkinHandler,
